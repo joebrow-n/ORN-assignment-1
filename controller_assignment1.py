@@ -28,6 +28,31 @@ def _handle_ConnectionUp ( event):
     msg = of.ofp_flow_mod(command = of.OFPFC_DELETE)
     event.connection.send(msg)
 
+    for rule in rules:
+        block = of.ofp_match()
+        block.dl_src = EthAddr(rule['eth-source'])
+        block.dl_dst = EthAddr(rule['eth-destination'])
+        if rule['QoS'] == 'block':
+            flow_mod = of.ofp_flow_mod()
+            flow_mod.match = block
+            flow_mod.priority = 32000
+            flow_mod.hard_timeout = 60
+            event.connection.send(flow_mod)
+        else:
+            if rule['eth-destination'] == '00:00:00:00:00:03':
+                flow_mod = of.ofp_flow_mod()
+                flow_mod.match = block
+                flow_mod.priority = 32500
+                flow_mod.hard_timeout = 60
+                flow_mod.actions.append(of.ofp_action_enqueue(port=3, queue_id=int(rule['QoS'])))
+                event.connection.send(flow_mod)
+            else:
+                flow_mod = of.ofp_flow_mod()
+                flow_mod.match = block
+                flow_mod.priority = 32500
+                flow_mod.hard_timeout = 60
+                flow_mod.actions.append(of.ofp_action_enqueue(port=4, queue_id=int(rule['QoS'])))
+                event.connection.send(flow_mod)
 
 def _handle_PacketIn ( event):
     dpid = event.connection.dpid
@@ -40,13 +65,22 @@ def _handle_PacketIn ( event):
 
     dst_port = table.get((event.connection, packet.dst))
 
-    if dst_port is None: 
-        install_rules(packet, event)
-
+    if dst_port is None:
+        # The switch does not know the destination, so sends the message out all ports.
+        # We could use either of the special ports OFPP_FLOOD or OFP_ALL.
+        #  But not all switches support OFPP_FLOOD. 
         msg = of.ofp_packet_out(data = event.ofp)
         msg.actions.append(of.ofp_action_output(port = of.OFPP_ALL))
         event.connection.send(msg)
     else:
+        # The switch knows the destination, so can route the packet. We also install the forward rule into the switch
+        msg = of.ofp_flow_mod()
+        msg.priority=100
+        msg.match.dl_dst = packet.src
+        msg.match.dl_src = packet.dst
+        msg.actions.append(of.ofp_action_output(port = event.port))
+        event.connection.send(msg)
+
         # We must forward the incoming packet…
         msg = of.ofp_packet_out()
         msg.data = event.ofp
@@ -54,6 +88,22 @@ def _handle_PacketIn ( event):
         event.connection.send(msg)
 
         log.debug("Installing %s <-> %s" % (packet.src, packet.dst))
+
+
+    # if dst_port is None: 
+    #     install_rules(packet, event)
+
+    #     msg = of.ofp_packet_out(data = event.ofp)
+    #     msg.actions.append(of.ofp_action_output(port = of.OFPP_ALL))
+    #     event.connection.send(msg)
+    # else:
+    #     # We must forward the incoming packet…
+    #     msg = of.ofp_packet_out()
+    #     msg.data = event.ofp
+    #     msg.actions.append(of.ofp_action_output(port = dst_port))
+    #     event.connection.send(msg)
+
+    #     log.debug("Installing %s <-> %s" % (packet.src, packet.dst))
 
 def install_rules(packet, event):
     for rule in rules:
