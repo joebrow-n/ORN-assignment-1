@@ -14,9 +14,11 @@ table={}
 
 rules=[{'eth-source': '00:00:00:00:00:01', 'eth-destination': '00:00:00:00:00:03', 'QoS': '0'}, 
        {'eth-source': '00:00:00:00:00:02', 'eth-destination': '00:00:00:00:00:03', 'QoS': '1'},
-       {'eth-source': '00:00:00:00:00:01', 'eth-destination': '00:00:00:00:00:04', 'QoS': '0'},
+       {'eth-source': '00:00:00:00:00:02', 'eth-destination': '00:00:00:00:00:04', 'QoS': '0'},
        {'eth-source': '00:00:00:00:00:01', 'eth-destination': '00:00:00:00:00:02', 'QoS': 'block'},
-       {'eth-source': '00:00:00:00:00:03', 'eth-destination': '00:00:00:00:00:04', 'QoS': 'block'}]
+       {'eth-source': '00:00:00:00:00:03', 'eth-destination': '00:00:00:00:00:04', 'QoS': 'block'},
+       {'eth-source': '00:00:00:00:00:02', 'eth-destination': '00:00:00:00:00:01', 'QoS': 'block'},
+       {'eth-source': '00:00:00:00:00:04', 'eth-destination': '00:00:00:00:00:03', 'QoS': 'block'}]
 
 def launch ():
     core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
@@ -28,131 +30,73 @@ def _handle_ConnectionUp ( event):
     msg = of.ofp_flow_mod(command = of.OFPFC_DELETE)
     event.connection.send(msg)
 
-    for rule in rules:
-        block = of.ofp_match()
-        block.dl_src = EthAddr(rule['eth-source'])
-        block.dl_dst = EthAddr(rule['eth-destination'])
-        if rule['QoS'] == 'block':
-            flow_mod = of.ofp_flow_mod()
-            flow_mod.match = block
-            flow_mod.priority = 32000
-            flow_mod.hard_timeout = 60
-            event.connection.send(flow_mod)
-        else:
-            if rule['eth-destination'] == '00:00:00:00:00:03':
-                flow_mod = of.ofp_flow_mod()
-                flow_mod.match = block
-                flow_mod.priority = 32500
-                flow_mod.hard_timeout = 60
-                flow_mod.actions.append(of.ofp_action_enqueue(port=3, queue_id=int(rule['QoS'])))
-                event.connection.send(flow_mod)
-            else:
-                flow_mod = of.ofp_flow_mod()
-                flow_mod.match = block
-                flow_mod.priority = 32500
-                flow_mod.hard_timeout = 60
-                flow_mod.actions.append(of.ofp_action_enqueue(port=4, queue_id=int(rule['QoS'])))
-                event.connection.send(flow_mod)
-
-def _handle_PacketIn ( event):
+def _handle_PacketIn(event):
     dpid = event.connection.dpid
-    sw=dpidToStr(event.dpid)
+    sw = dpidToStr(dpid)
     inport = event.port
     packet = event.parsed
-    log.debug("Event: switch %s port %s packet %s" % (sw, inport, packet))
+    log.debug("Event: switch %s port %s packet %s", sw, inport, packet)
 
-    table[(event.connection, packet.src)] = event.port
+    table[(event.connection, packet.src)] = inport
 
     dst_port = table.get((event.connection, packet.dst))
 
     if dst_port is None:
-        # The switch does not know the destination, so sends the message out all ports.
-        # We could use either of the special ports OFPP_FLOOD or OFP_ALL.
-        #  But not all switches support OFPP_FLOOD. 
-        msg = of.ofp_packet_out(data = event.ofp)
-        msg.actions.append(of.ofp_action_output(port = of.OFPP_ALL))
+        msg = of.ofp_packet_out(data=event.ofp)
+        msg.actions.append(of.ofp_action_output(port=of.OFPP_ALL))
         event.connection.send(msg)
     else:
-        # The switch knows the destination, so can route the packet. We also install the forward rule into the switch
-        msg = of.ofp_flow_mod()
-        msg.priority=100
-        msg.match.dl_dst = packet.src
-        msg.match.dl_src = packet.dst
-        msg.actions.append(of.ofp_action_output(port = event.port))
-        event.connection.send(msg)
+        rule_found = False
+        for rule in rules:
+            if packet.src == rule['eth-source'] and packet.dst == rule['eth-destination']:
+                rule_found = True
+                block = of.ofp_match()
+                block.dl_src = EthAddr(rule['eth-source'])
+                block.dl_dst = EthAddr(rule['eth-destination'])
+                if rule['QoS'] == 'block':
+                    flow_mod = of.ofp_flow_mod()
+                    flow_mod.match = block
+                    flow_mod.priority = 33000
+                    flow_mod.hard_timeout = 60
+                    event.connection.send(flow_mod)
+                elif packet.src == '00:00:00:00:00:01' and packet.dst == '00:00:00:00:00:03':
+                    flow_mod = of.ofp_flow_mod()
+                    flow_mod.match = block
+                    flow_mod.priority = 32500
+                    flow_mod.hard_timeout = 60
+                    flow_mod.actions.append(of.ofp_action_enqueue(port=3, queue_id=0))
+                    event.connection.send(flow_mod)
+                elif packet.src == '00:00:00:00:00:02' and packet.dst == '00:00:00:00:00:03':
+                    flow_mod = of.ofp_flow_mod()
+                    flow_mod.match = block
+                    flow_mod.priority = 35000
+                    flow_mod.hard_timeout = 60
+                    flow_mod.actions.append(of.ofp_action_enqueue(port=3, queue_id=1))
+                    event.connection.send(flow_mod)
+                else:
+                    flow_mod = of.ofp_flow_mod()
+                    flow_mod.match = block
+                    flow_mod.priority = 32500
+                    flow_mod.hard_timeout = 60
+                    flow_mod.actions.append(of.ofp_action_enqueue(port=4, queue_id=0))
+                    event.connection.send(flow_mod)
+
+        if not rule_found:
+            msg = of.ofp_flow_mod()
+            msg.priority = 100
+            msg.match.dl_dst = packet.src
+            msg.match.dl_src = packet.dst
+            msg.actions.append(of.ofp_action_output(port=inport))
+            event.connection.send(msg)
 
         # We must forward the incoming packet…
         msg = of.ofp_packet_out()
         msg.data = event.ofp
-        msg.actions.append(of.ofp_action_output(port = dst_port))
+        msg.actions.append(of.ofp_action_output(port=dst_port))
         event.connection.send(msg)
 
-        log.debug("Installing %s <-> %s" % (packet.src, packet.dst))
+        log.debug("Installing %s <-> %s", packet.src, packet.dst)
 
-
-    # if dst_port is None: 
-    #     install_rules(packet, event)
-
-    #     msg = of.ofp_packet_out(data = event.ofp)
-    #     msg.actions.append(of.ofp_action_output(port = of.OFPP_ALL))
-    #     event.connection.send(msg)
-    # else:
-    #     # We must forward the incoming packet…
-    #     msg = of.ofp_packet_out()
-    #     msg.data = event.ofp
-    #     msg.actions.append(of.ofp_action_output(port = dst_port))
-    #     event.connection.send(msg)
-
-    #     log.debug("Installing %s <-> %s" % (packet.src, packet.dst))
-
-def install_rules(packet, event):
-    for rule in rules:
-        if rule['eth-source'] == packet.src and rule['eth-destination'] == packet.dst:
-            if rule['QoS'] == 'block':
-                block = of.ofp_match()
-                block.dl_src = EthAddr(rule['eth-source'])
-                block.dl_dst = EthAddr(rule['eth-destination'])
-                msg = of.ofp_flow_mod()
-                msg.match = block
-                msg.priority = 32000
-                msg.hard_timeout = 60
-                event.connection.send(msg)
-                return
-            else: 
-                limit = of.ofp_match()
-                limit.dl_src = EthAddr(rule['eth-source'])
-                limit.dl_dst = EthAddr(rule['eth-destination'])
-                msg = of.ofp_flow_mod()
-                msg.match = limit
-                msg.priority = 32000
-                msg.hard_timeout = 60
-
-                if rule['eth-source'] == '00:00:00:00:00:01' and rule['eth-destination'] == '00:00:00:00:00:03':
-                    msg.actions.append(of.ofp_action_output(port=3, queue_id=0))
-                    event.connection.send(msg)
-                    return
-                elif rule['eth-source'] == '00:00:00:00:00:02' and rule['eth-destination'] == '00:00:00:00:00:03':
-                    msg.actions.append(of.ofp_action_output(port=3, queue_id=1))
-                    event.connection.send(msg)
-                    return
-                else:
-                    msg.actions.append(of.ofp_action_output(port=4, queue_id=0))
-                    event.connection.send(msg)
-                    return
-
-    msg = of.ofp_flow_mod()
-    msg.priority=100
-    msg.match.dl_dst = packet.src
-    msg.match.dl_src = packet.dst
-    msg.actions.append(of.ofp_action_output(port = event.port))
-    event.connection.send(msg)
-    return
-
-
-
-        
-        
-        
     
     ######### Add new code hereThis is the part where you should loop over the rules you have defined    #########################################################
     ##############                                                                                                                                  ##############
